@@ -11,9 +11,9 @@
 #[cfg(unix)]
 use {
     nix::sys::signal::{self, Signal},
-    nix::unistd::{close, pipe, read, Pid},
+    nix::unistd::{pipe, read, Pid},
+    std::os::fd::{AsRawFd, OwnedFd},
     std::os::unix::fs::PermissionsExt,
-    std::os::unix::io::AsRawFd,
 };
 #[cfg(windows)]
 use {
@@ -285,22 +285,19 @@ fn create_job_object() -> Result<HANDLE, std::io::Error> {
 }
 
 #[cfg(unix)]
-fn monitor_parent_process(child_pid: u32, read_fd: i32) {
+fn monitor_parent_process(child_pid: u32, read_fd: OwnedFd) {
     thread::spawn(move || {
         // Read from the pipe - when parent dies, the write end is closed by the OS
         // and we'll get EOF (read returns 0)
         let mut buf = [0u8; 1];
         loop {
-            match read(read_fd, &mut buf) {
+            match read(read_fd.as_raw_fd(), &mut buf) {
                 Ok(0) => {
                     // EOF means parent died (write end of pipe closed)
                     info!(
                         "Parent process died (pipe closed), terminating child {}",
                         child_pid
                     );
-
-                    // Close our read end of the pipe
-                    let _ = close(read_fd);
 
                     // Send SIGTERM to the child process
                     if let Err(e) = send_sigterm(child_pid) {
@@ -317,7 +314,6 @@ fn monitor_parent_process(child_pid: u32, read_fd: i32) {
                 Err(e) => {
                     // Error reading from pipe - parent likely died
                     error!("Error reading from parent monitor pipe: {}", e);
-                    let _ = close(read_fd);
 
                     if let Err(e) = send_sigterm(child_pid) {
                         error!("Failed to terminate child process {}: {}", child_pid, e);
@@ -543,11 +539,11 @@ fn start_generic_module_thread(
         let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
             Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
+                (Some(read_fd), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
-                (-1, None)
+                (None, None)
             }
         };
 
@@ -577,10 +573,6 @@ fn start_generic_module_thread(
                         CloseHandle(handle);
                     }
                 }
-                #[cfg(unix)]
-                if pipe_read_fd >= 0 {
-                    let _ = close(pipe_read_fd);
-                }
                 return;
             }
         };
@@ -604,7 +596,7 @@ fn start_generic_module_thread(
 
         // On Unix, start parent process monitor with pipe
         #[cfg(unix)]
-        if pipe_read_fd >= 0 {
+        if let Some(pipe_read_fd) = pipe_read_fd {
             monitor_parent_process(child_pid, pipe_read_fd);
         }
 
@@ -661,11 +653,11 @@ fn start_notify_module_thread(
         let (pipe_read_fd, _pipe_write_keeper) = match pipe() {
             Ok((read_fd, write_fd)) => {
                 // read_fd is read end, write_fd stays open in parent and auto-closes when parent dies
-                (read_fd.as_raw_fd(), Some(std::fs::File::from(write_fd)))
+                (Some(read_fd), Some(std::fs::File::from(write_fd)))
             }
             Err(e) => {
                 error!("Failed to create pipe for parent monitoring: {}", e);
-                (-1, None)
+                (None, None)
             }
         };
 
@@ -709,10 +701,6 @@ fn start_notify_module_thread(
                             CloseHandle(handle);
                         }
                     }
-                    #[cfg(unix)]
-                    if pipe_read_fd >= 0 {
-                        let _ = close(pipe_read_fd);
-                    }
                     // Fallback to generic module handler to avoid recursion
                     start_generic_module_thread(name, path, custom_args, tx);
                     return;
@@ -723,10 +711,6 @@ fn start_notify_module_thread(
                         unsafe {
                             CloseHandle(handle);
                         }
-                    }
-                    #[cfg(unix)]
-                    if pipe_read_fd >= 0 {
-                        let _ = close(pipe_read_fd);
                     }
                     return;
                 }
@@ -752,7 +736,7 @@ fn start_notify_module_thread(
 
         // On Unix, start parent process monitor with pipe
         #[cfg(unix)]
-        if pipe_read_fd >= 0 {
+        if let Some(pipe_read_fd) = pipe_read_fd {
             monitor_parent_process(child_pid, pipe_read_fd);
         }
 
@@ -816,10 +800,6 @@ fn start_notify_module_thread(
                     unsafe {
                         CloseHandle(handle);
                     }
-                }
-                #[cfg(unix)]
-                if pipe_read_fd >= 0 {
-                    let _ = close(pipe_read_fd);
                 }
 
                 // Fallback to generic module handler

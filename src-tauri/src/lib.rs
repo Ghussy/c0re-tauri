@@ -25,7 +25,7 @@ use tauri::{
     AppHandle, Manager,
 };
 #[cfg(target_os = "windows")]
-use window_vibrancy::{apply_mica, clear_mica};
+use window_vibrancy::{apply_acrylic, apply_mica, clear_acrylic, clear_mica};
 #[cfg(target_os = "macos")]
 use window_vibrancy::{
     apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
@@ -63,7 +63,7 @@ static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 static UI_VIBRANCY_ENABLED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 fn default_vibrancy_enabled() -> bool {
-    true
+    cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,10 +481,31 @@ fn apply_desktop_vibrancy(app: &AppHandle, enabled: bool) -> Result<(), String> 
     #[cfg(target_os = "windows")]
     {
         if enabled {
-            apply_mica(&main_window, None)
-                .map_err(|e| format!("Failed to apply Windows mica: {}", e))?;
+            if let Err(mica_error) = apply_mica(&main_window, None) {
+                apply_acrylic(&main_window, None).map_err(|acrylic_error| {
+                    format!(
+                        "Failed to apply Windows vibrancy (mica error: {}; acrylic error: {})",
+                        mica_error, acrylic_error
+                    )
+                })?;
+            }
         } else {
-            clear_mica(&main_window).map_err(|e| format!("Failed to clear Windows mica: {}", e))?;
+            // Try clearing both effects in case the user switched between mica/acrylic.
+            let mica_result = clear_mica(&main_window);
+            let acrylic_result = clear_acrylic(&main_window);
+            if mica_result.is_err() && acrylic_result.is_err() {
+                return Err(format!(
+                    "Failed to clear Windows vibrancy (mica error: {}; acrylic error: {})",
+                    mica_result
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    acrylic_result
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "none".to_string())
+                ));
+            }
         }
     }
 
@@ -495,12 +516,24 @@ fn apply_desktop_vibrancy(app: &AppHandle, enabled: bool) -> Result<(), String> 
 #[serde(rename_all = "camelCase")]
 struct UiPreferencesResponse {
     vibrancy_enabled: bool,
+    vibrancy_supported: bool,
+}
+
+fn vibrancy_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 #[tauri::command]
 fn get_ui_preferences() -> UiPreferencesResponse {
+    let enabled = if vibrancy_supported() {
+        get_ui_vibrancy_state()
+    } else {
+        false
+    };
+
     UiPreferencesResponse {
-        vibrancy_enabled: get_ui_vibrancy_state(),
+        vibrancy_enabled: enabled,
+        vibrancy_supported: vibrancy_supported(),
     }
 }
 
@@ -509,12 +542,19 @@ fn set_desktop_vibrancy_enabled(
     app: AppHandle,
     enabled: bool,
 ) -> Result<UiPreferencesResponse, String> {
-    apply_desktop_vibrancy(&app, enabled)?;
-    set_ui_vibrancy_state(enabled);
-    persist_ui_vibrancy_setting(enabled)?;
+    let supported = vibrancy_supported();
+    let next_enabled = enabled && supported;
+
+    if supported {
+        apply_desktop_vibrancy(&app, next_enabled)?;
+    }
+
+    set_ui_vibrancy_state(next_enabled);
+    persist_ui_vibrancy_setting(next_enabled)?;
 
     Ok(UiPreferencesResponse {
-        vibrancy_enabled: enabled,
+        vibrancy_enabled: next_enabled,
+        vibrancy_supported: supported,
     })
 }
 
