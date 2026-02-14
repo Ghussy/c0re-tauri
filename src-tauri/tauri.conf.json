@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "aw-tauri",
+  "productName": "c0re",
   "version": "0.1.0",
-  "identifier": "net.activitywatch.app",
+  "identifier": "com.c0re.tauri",
   "app": {
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "aw-tauri",
+        "title": "c0re",
         "width": 800,
         "height": 600,
         "visible": false,
