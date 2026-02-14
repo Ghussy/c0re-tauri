@@ -12,6 +12,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        token: ${{ secrets.CORE_WEBUI_READ_TOKEN || github.token }}
     - name: Set up Rust nightly
       run: |
         rustup toolchain install nightly
@@ -24,6 +27,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        token: ${{ secrets.CORE_WEBUI_READ_TOKEN || github.token }}
     - name: Install dependencies
       run: |
         # From: https://tauri.app/v1/guides/getting-started/prerequisites
