@@ -48,3 +48,4 @@ winapi = { version = "0.3.9", features = ["winuser", "jobapi2", "handleapi", "pr
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-autostart = "2.2.0"
+window-vibrancy = "0.6.0"

@@ -49,7 +49,7 @@ make build
 
 # Repo stucture
 
- - The frontend is in the root folder (NOTE: not yet the actual aw-webui code)
+ - The frontend is in the root folder (NOTE: not yet the actual c0re-webui code)
  - All rust code is in `src-tauri/` (will likely be moved)
 
 # Roadmap
@@ -70,7 +70,7 @@ Secondary goal is to add extras supported by Tauri (updater, autostart).
  - [x] Polish
      - [x] Remove placeholder Vue app
          - Or replace with new UI for module management? (a bit redundant)
-     - [x] Build aw-webui as part of build process
+     - [x] Build c0re-webui as part of build process
      - [x] Error dialog when module crashes, restart logic
          - https://tauri.app/plugin/dialog/
      - [x] https://tauri.app/plugin/autostart/

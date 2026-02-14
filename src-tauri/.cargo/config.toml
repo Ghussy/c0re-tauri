@@ -1,2 +1,2 @@
 [env]
-AW_WEBUI_DIR = { value = "../aw-webui/dist", relative = true }
+AW_WEBUI_DIR = { value = "../c0re-webui/dist", relative = true }

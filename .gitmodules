@@ -1,3 +1,3 @@
-[submodule "aw-webui"]
-	path = aw-webui
-	url = https://github.com/ActivityWatch/aw-webui.git
+[submodule "c0re-webui"]
+	path = c0re-webui
+	url = https://github.com/C0RE-Services/c0re-webui.git

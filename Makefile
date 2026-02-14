@@ -14,14 +14,18 @@ dev: prebuild
 %/.git:
 	git submodule update --init --recursive
 
-src-tauri/icons/icon.png: aw-webui/.git
+src-tauri/icons/icon.png: c0re-webui/.git
 	mkdir -p src-tauri/icons
-	npm run tauri icon "./aw-webui/media/logo/logo.png"
+	if [ -f "./c0re-webui/public/logo.png" ]; then \
+		npm run tauri icon "./c0re-webui/public/logo.png"; \
+	else \
+		npm run tauri icon "./c0re-webui/public/logo.svg"; \
+	fi
 
-aw-webui/dist: aw-webui/.git
-	cd aw-webui && make build
+c0re-webui/dist: c0re-webui/.git c0re-webui/package.json c0re-webui/pnpm-lock.yaml
+	cd c0re-webui && corepack pnpm install --frozen-lockfile && corepack pnpm run build
 
-prebuild: aw-webui/dist node_modules src-tauri/icons/icon.png
+prebuild: c0re-webui/dist node_modules src-tauri/icons/icon.png
 
 precommit: format check
 

@@ -24,6 +24,12 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconId},
     AppHandle, Manager,
 };
+#[cfg(target_os = "windows")]
+use window_vibrancy::{apply_mica, clear_mica};
+#[cfg(target_os = "macos")]
+use window_vibrancy::{
+    apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
+};
 
 pub struct AppHandleWrapper(Mutex<AppHandle>);
 
@@ -54,6 +60,25 @@ lazy_static! {
 }
 static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
+static UI_VIBRANCY_ENABLED: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn default_vibrancy_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_vibrancy_enabled")]
+    pub vibrancy_enabled: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            vibrancy_enabled: default_vibrancy_enabled(),
+        }
+    }
+}
 
 fn init_app_handle(handle: AppHandle) {
     HANDLE.get_or_init(|| AppHandleWrapper(Mutex::new(handle)));
@@ -128,6 +153,13 @@ fn write_formatted_config(config: &UserConfig, path: &Path) -> Result<(), std::i
         output.push('\n'); // Add back just the newline
     }
     output.push_str("]\n");
+    output.push_str("\n");
+
+    output.push_str("[ui]\n");
+    output.push_str(&format!(
+        "vibrancy_enabled = {}\n",
+        config.ui.vibrancy_enabled
+    ));
 
     write(path, output)
 }
@@ -291,6 +323,8 @@ pub struct UserConfig {
     pub port: u16,
     pub discovery_paths: Vec<PathBuf>,
     pub autostart: AutostartConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl Default for UserConfig {
@@ -334,6 +368,7 @@ impl Default for UserConfig {
                 minimized: true,
                 modules,
             },
+            ui: UiConfig::default(),
         }
     }
 }
@@ -377,6 +412,109 @@ pub(crate) fn get_config() -> &'static UserConfig {
             write_formatted_config(&config, &config_path).expect("Failed to write config file");
             config
         }
+    })
+}
+
+fn init_ui_vibrancy_state(enabled: bool) {
+    let state = UI_VIBRANCY_ENABLED.get_or_init(|| Mutex::new(enabled));
+    if let Ok(mut guard) = state.lock() {
+        *guard = enabled;
+    }
+}
+
+fn get_ui_vibrancy_state() -> bool {
+    UI_VIBRANCY_ENABLED
+        .get()
+        .and_then(|state| state.lock().ok().map(|guard| *guard))
+        .unwrap_or_else(default_vibrancy_enabled)
+}
+
+fn set_ui_vibrancy_state(enabled: bool) {
+    let state = UI_VIBRANCY_ENABLED.get_or_init(|| Mutex::new(enabled));
+    if let Ok(mut guard) = state.lock() {
+        *guard = enabled;
+    }
+}
+
+fn persist_ui_vibrancy_setting(enabled: bool) -> Result<(), String> {
+    let config_path = get_config_path();
+    let mut config = if config_path.exists() {
+        let config_str = read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config file: {}", e))?;
+        toml::from_str::<UserConfig>(&config_str)
+            .map_err(|e| format!("Failed to parse config file: {}", e))?
+    } else {
+        UserConfig::default()
+    };
+
+    config.ui.vibrancy_enabled = enabled;
+
+    if let Some(parent) = config_path.parent() {
+        create_dir_all(parent).map_err(|e| format!("Failed to create config directory: {}", e))?;
+    }
+    write_formatted_config(&config, &config_path)
+        .map_err(|e| format!("Failed to write config file: {}", e))
+}
+
+fn apply_desktop_vibrancy(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        if enabled {
+            apply_vibrancy(
+                &main_window,
+                NSVisualEffectMaterial::Sidebar,
+                Some(NSVisualEffectState::Active),
+                None,
+            )
+            .map_err(|e| format!("Failed to apply macOS vibrancy: {}", e))?;
+        } else {
+            clear_vibrancy(&main_window)
+                .map(|_| ())
+                .map_err(|e| format!("Failed to clear macOS vibrancy: {}", e))?;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if enabled {
+            apply_mica(&main_window, None)
+                .map_err(|e| format!("Failed to apply Windows mica: {}", e))?;
+        } else {
+            clear_mica(&main_window).map_err(|e| format!("Failed to clear Windows mica: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiPreferencesResponse {
+    vibrancy_enabled: bool,
+}
+
+#[tauri::command]
+fn get_ui_preferences() -> UiPreferencesResponse {
+    UiPreferencesResponse {
+        vibrancy_enabled: get_ui_vibrancy_state(),
+    }
+}
+
+#[tauri::command]
+fn set_desktop_vibrancy_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<UiPreferencesResponse, String> {
+    apply_desktop_vibrancy(&app, enabled)?;
+    set_ui_vibrancy_state(enabled);
+    persist_ui_vibrancy_setting(enabled)?;
+
+    Ok(UiPreferencesResponse {
+        vibrancy_enabled: enabled,
     })
 }
 
@@ -427,6 +565,7 @@ pub fn run() {
                 //TODO: Some of this setup could run concurrently. Could slash a few 100ms in startup?
                 init_app_handle(app.handle().clone());
                 let user_config = get_config();
+                init_ui_vibrancy_state(user_config.ui.vibrancy_enabled);
                 // Get the autostart manager
                 let autostart_manager = app.autolaunch();
 
@@ -505,6 +644,10 @@ pub fn run() {
                 main_window
                     .navigate(url)
                     .expect("Error navigating main window");
+
+                if let Err(e) = apply_desktop_vibrancy(app.handle(), get_ui_vibrancy_state()) {
+                    warn!("{}", e);
+                }
                 let manager_state = manager::start_manager();
 
                 let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)
@@ -590,7 +733,11 @@ pub fn run() {
             };
         })
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_ui_preferences,
+            set_desktop_vibrancy_enabled
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
