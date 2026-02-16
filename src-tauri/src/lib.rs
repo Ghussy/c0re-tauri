@@ -19,6 +19,8 @@ mod logging;
 mod manager;
 
 use log::{info, trace, warn};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSWindow, NSWindowButton};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconId},
@@ -61,6 +63,10 @@ lazy_static! {
 static CONFIG: OnceLock<UserConfig> = OnceLock::new();
 static FIRST_RUN: OnceLock<bool> = OnceLock::new();
 static UI_VIBRANCY_ENABLED: OnceLock<Mutex<bool>> = OnceLock::new();
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_X: f64 = 16.0;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_Y: f64 = 24.0;
 
 fn default_vibrancy_enabled() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
@@ -512,6 +518,61 @@ fn apply_desktop_vibrancy(app: &AppHandle, enabled: bool) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn set_macos_traffic_light_position(window: &tauri::WebviewWindow) -> Result<(), String> {
+    window
+        .with_webview(move |webview| unsafe {
+            let ns_window_ptr = webview.ns_window();
+            if ns_window_ptr.is_null() {
+                warn!("Skipping traffic light inset: ns_window pointer is null");
+                return;
+            }
+            let ns_window: &NSWindow = &*ns_window_ptr.cast();
+            inset_macos_traffic_lights(ns_window, MACOS_TRAFFIC_LIGHT_X, MACOS_TRAFFIC_LIGHT_Y);
+        })
+        .map_err(|e| format!("Failed to set macOS traffic light position: {}", e))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn inset_macos_traffic_lights(window: &NSWindow, x: f64, y: f64) {
+    let Some(close) = window.standardWindowButton(NSWindowButton::NSWindowCloseButton) else {
+        warn!("Skipping traffic light inset: close button not found");
+        return;
+    };
+    let Some(miniaturize) = window.standardWindowButton(NSWindowButton::NSWindowMiniaturizeButton)
+    else {
+        warn!("Skipping traffic light inset: minimize button not found");
+        return;
+    };
+    let Some(zoom) = window.standardWindowButton(NSWindowButton::NSWindowZoomButton) else {
+        warn!("Skipping traffic light inset: zoom button not found");
+        return;
+    };
+
+    let Some(close_superview) = close.superview() else {
+        warn!("Skipping traffic light inset: close button superview not found");
+        return;
+    };
+    let Some(title_bar_container_view) = close_superview.superview() else {
+        warn!("Skipping traffic light inset: title bar container view not found");
+        return;
+    };
+
+    let close_rect = close.frame();
+    let title_bar_frame_height = close_rect.size.height + y;
+    let mut title_bar_rect = title_bar_container_view.frame();
+    title_bar_rect.size.height = title_bar_frame_height;
+    title_bar_rect.origin.y = window.frame().size.height - title_bar_frame_height;
+    title_bar_container_view.setFrame(title_bar_rect);
+
+    let space_between = miniaturize.frame().origin.x - close_rect.origin.x;
+    for (i, button) in [close, miniaturize, zoom].into_iter().enumerate() {
+        let mut rect = button.frame();
+        rect.origin.x = x + (i as f64 * space_between);
+        button.setFrameOrigin(rect.origin);
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UiPreferencesResponse {
@@ -556,6 +617,35 @@ fn set_desktop_vibrancy_enabled(
         vibrancy_enabled: next_enabled,
         vibrancy_supported: supported,
     })
+}
+
+#[tauri::command]
+fn set_macos_movable_by_window_background(app: AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let main_window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "Main window not found".to_string())?;
+
+        main_window
+            .with_webview(move |webview| unsafe {
+                let ns_window_ptr = webview.ns_window();
+                if ns_window_ptr.is_null() {
+                    warn!("Skipping movable-by-background toggle: ns_window pointer is null");
+                    return;
+                }
+                let ns_window: &NSWindow = &*ns_window_ptr.cast();
+                ns_window.setMovableByWindowBackground(enabled);
+            })
+            .map_err(|e| format!("Failed to set movable-by-background: {}", e))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, enabled);
+    }
+
+    Ok(())
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -653,8 +743,17 @@ pub fn run() {
                         panic!("Path set via env var AW_WEBUI_DIR does not exist");
                     }
                 } else {
-                    info!("Using bundled assets");
-                    None
+                    let fallback_path = PathBuf::from("../c0re-webui/dist");
+                    if fallback_path.exists() {
+                        info!(
+                            "AW_WEBUI_DIR not set, using dev fallback webui path: {}",
+                            fallback_path.display()
+                        );
+                        Some(fallback_path)
+                    } else {
+                        info!("Using bundled assets");
+                        None
+                    }
                 };
 
                 let server_state = aw_server::endpoints::ServerState {
@@ -684,6 +783,11 @@ pub fn run() {
                 main_window
                     .navigate(url)
                     .expect("Error navigating main window");
+
+                #[cfg(target_os = "macos")]
+                if let Err(e) = set_macos_traffic_light_position(&main_window) {
+                    warn!("{}", e);
+                }
 
                 if let Err(e) = apply_desktop_vibrancy(app.handle(), get_ui_vibrancy_state()) {
                     warn!("{}", e);
@@ -767,6 +871,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+            ) && window.label() == "main"
+            {
+                if let Some(main_window) = window.app_handle().get_webview_window("main") {
+                    if let Err(e) = set_macos_traffic_light_position(&main_window) {
+                        warn!("{}", e);
+                    }
+                }
+            }
+
             if let tauri::WindowEvent::CloseRequested { api, .. } = &event {
                 api.prevent_close();
                 window.hide().expect("Failed to hide main window");
@@ -776,7 +893,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             get_ui_preferences,
-            set_desktop_vibrancy_enabled
+            set_desktop_vibrancy_enabled,
+            set_macos_movable_by_window_background
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
