@@ -72,6 +72,39 @@ fn default_vibrancy_enabled() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
+fn auth_callback_url_from_arg(raw_arg: &str, port: u16) -> Option<String> {
+    let prefix = "c0re://auth/callback";
+    if !raw_arg.starts_with(prefix) {
+        return None;
+    }
+
+    let mut suffix = raw_arg.strip_prefix(prefix).unwrap_or_default();
+    if let Some(trimmed) = suffix.strip_prefix('/') {
+        suffix = trimmed;
+    }
+    // aw-server serves the SPA at "/" (no "/auth/callback" route),
+    // so redirect callback payloads to root with a marker flag.
+    let mut url = format!("http://localhost:{}/?__auth_callback=1", port);
+    if let Some(query) = suffix.strip_prefix('?') {
+        if !query.is_empty() {
+            url.push('&');
+            url.push_str(query);
+        }
+    } else if let Some(fragment) = suffix.strip_prefix('#') {
+        if !fragment.is_empty() {
+            url.push('&');
+            url.push_str(fragment);
+        }
+    }
+
+    Some(url)
+}
+
+fn auth_callback_url_from_args(args: &[String], port: u16) -> Option<String> {
+    args.iter()
+        .find_map(|arg| auth_callback_url_from_arg(arg.as_str(), port))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     #[serde(default = "default_vibrancy_enabled")]
@@ -668,13 +701,6 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::AppleScript,
-            Some(vec![]),
-        ))
         .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
             let lock_path = get_runtime_path().join("single_instance.lock");
             if !lock_path.parent().unwrap().exists() {
@@ -686,8 +712,33 @@ pub fn run() {
                 .truncate(true)
                 .open(lock_path)
                 .expect("Failed to open lock file");
+
+            if let Some(callback_url) = auth_callback_url_from_args(&_args, get_config().port) {
+                if let Ok(parsed_url) = callback_url.parse() {
+                    if let Some(window) = _app.get_webview_window("main") {
+                        let _ = window.navigate(parsed_url);
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+
+            // On a second launch, surface the already-running instance so the
+            // app does not feel like it silently exited.
+            if let Some(window) = _app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
             info!("Another instance is running, quitting!");
         }))
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::AppleScript,
+            Some(vec![]),
+        ))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -776,13 +827,23 @@ pub fn run() {
                 let url = format!("http://localhost:{}/", user_config.port)
                     .parse()
                     .expect("Failed to parse localhost url");
-                let mut main_window = app
+                let main_window = app
                     .get_webview_window("main")
                     .expect("Failed to show main window");
 
                 main_window
                     .navigate(url)
                     .expect("Error navigating main window");
+
+                // Handle auth deep links on cold start (first instance).
+                let startup_args = env::args().collect::<Vec<_>>();
+                if let Some(callback_url) =
+                    auth_callback_url_from_args(&startup_args, user_config.port)
+                {
+                    if let Ok(parsed_url) = callback_url.parse() {
+                        let _ = main_window.navigate(parsed_url);
+                    }
+                }
 
                 #[cfg(target_os = "macos")]
                 if let Err(e) = set_macos_traffic_light_position(&main_window) {
@@ -890,6 +951,7 @@ pub fn run() {
             };
         })
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             get_ui_preferences,

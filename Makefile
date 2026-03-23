@@ -16,16 +16,18 @@ dev: prebuild
 
 src-tauri/icons/icon.png: c0re-webui/.git
 	mkdir -p src-tauri/icons
-	if [ -f "./c0re-webui/public/logo.png" ]; then \
+	if [ -f "./c0re-webui/public/logo.svg" ]; then \
+		npm run tauri icon "./c0re-webui/public/logo.svg"; \
+	elif [ -f "./c0re-webui/public/logo.png" ]; then \
 		npm run tauri icon "./c0re-webui/public/logo.png"; \
 	else \
-		npm run tauri icon "./c0re-webui/public/logo.svg"; \
+		echo "No icon source found in c0re-webui/public (expected logo.svg or logo.png)" && exit 1; \
 	fi
 
-c0re-webui/dist: c0re-webui/.git c0re-webui/package.json c0re-webui/pnpm-lock.yaml
+webui-build: c0re-webui/.git c0re-webui/package.json c0re-webui/pnpm-lock.yaml
 	cd c0re-webui && corepack pnpm install --frozen-lockfile && corepack pnpm run build
 
-prebuild: c0re-webui/dist node_modules src-tauri/icons/icon.png
+prebuild: webui-build node_modules src-tauri/icons/icon.png
 
 precommit: format check
 

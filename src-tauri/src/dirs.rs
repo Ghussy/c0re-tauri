@@ -17,6 +17,44 @@ lazy_static! {
         Mutex::new(PathBuf::from("/data/user/0/net.activitywatch.app/files"));
 }
 
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn get_bundled_module_dirs() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(contents_dir) = exe_path.parent().and_then(|path| path.parent()) {
+            let bundled_resources = contents_dir.join("Resources");
+            if bundled_resources.exists() {
+                push_unique_path(&mut paths, bundled_resources);
+            }
+
+            let bundled_modules = contents_dir.join("Resources").join("modules");
+            if bundled_modules.exists() {
+                push_unique_path(&mut paths, bundled_modules);
+            }
+        }
+    }
+
+    let dev_modules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("modules");
+    if dev_modules.exists() {
+        push_unique_path(&mut paths, dev_modules);
+    }
+
+    paths
+}
+
+#[cfg(target_os = "android")]
+pub fn get_bundled_module_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[cfg(not(target_os = "android"))]
 pub fn get_config_dir() -> Result<PathBuf, ()> {
     let mut dir = appdirs::user_config_dir(Some("activitywatch"), None, false)?;
@@ -112,6 +150,10 @@ pub fn get_runtime_dir() -> PathBuf {
 pub fn get_discovery_paths() -> Vec<PathBuf> {
     let mut discovery_paths = Vec::new();
 
+    for path in get_bundled_module_dirs() {
+        push_unique_path(&mut discovery_paths, path);
+    }
+
     #[cfg(target_os = "linux")]
     {
         // Linux: XDG-compliant paths
@@ -119,14 +161,15 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
             let home_path = PathBuf::from(&home_dir);
 
             // User executables directories
-            discovery_paths.push(home_path.join("bin")); // ~/bin (traditional)
-            discovery_paths.push(home_path.join(".local").join("bin")); // ~/.local/bin (modern XDG)
+            push_unique_path(&mut discovery_paths, home_path.join("bin")); // ~/bin (traditional)
+            push_unique_path(&mut discovery_paths, home_path.join(".local").join("bin")); // ~/.local/bin (modern XDG)
 
             // XDG_DATA_HOME or ~/.local/share (user data)
             let data_dir = std::env::var("XDG_DATA_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| home_path.join(".local").join("share"));
-            discovery_paths.push(
+            push_unique_path(
+                &mut discovery_paths,
                 data_dir
                     .join("activitywatch")
                     .join("aw-tauri")
@@ -134,7 +177,7 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
             );
 
             // Legacy path for backward compatibility
-            discovery_paths.push(home_path.join("aw-modules"));
+            push_unique_path(&mut discovery_paths, home_path.join("aw-modules"));
         }
     }
 
@@ -142,11 +185,17 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
     {
         // Windows: User-specific and system paths
         if let Ok(username) = std::env::var("USERNAME") {
-            discovery_paths.push(PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)));
-            discovery_paths.push(PathBuf::from(format!(
-                r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
-                username
-            )));
+            push_unique_path(
+                &mut discovery_paths,
+                PathBuf::from(format!(r"C:/Users/{}/aw-modules", username)),
+            );
+            push_unique_path(
+                &mut discovery_paths,
+                PathBuf::from(format!(
+                    r"C:/Users/{}/AppData/Local/Programs/ActivityWatch",
+                    username
+                )),
+            );
         }
     }
 
@@ -154,14 +203,19 @@ pub fn get_discovery_paths() -> Vec<PathBuf> {
     {
         // macOS: Application bundle and user paths
         if let Ok(home_dir) = std::env::var("HOME") {
-            discovery_paths.push(PathBuf::from(home_dir).join("aw-modules"));
+            push_unique_path(
+                &mut discovery_paths,
+                PathBuf::from(home_dir).join("aw-modules"),
+            );
         }
-        discovery_paths.push(PathBuf::from(
-            "/Applications/ActivityWatch.app/Contents/MacOS",
-        ));
-        discovery_paths.push(PathBuf::from(
-            "/Applications/ActivityWatch.app/Contents/Resources",
-        ));
+        push_unique_path(
+            &mut discovery_paths,
+            PathBuf::from("/Applications/ActivityWatch.app/Contents/MacOS"),
+        );
+        push_unique_path(
+            &mut discovery_paths,
+            PathBuf::from("/Applications/ActivityWatch.app/Contents/Resources"),
+        );
     }
 
     #[cfg(target_os = "android")]

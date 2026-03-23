@@ -10,6 +10,7 @@
 
 #[cfg(unix)]
 use {
+    libc::{flock, LOCK_EX, LOCK_NB, LOCK_UN},
     nix::sys::signal::{self, Signal},
     nix::unistd::{pipe, read, Pid},
     std::os::fd::{AsRawFd, OwnedFd},
@@ -32,6 +33,8 @@ use {
 
 use log::{debug, error, info, trace};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
@@ -41,7 +44,7 @@ use std::sync::{
 use std::time::Duration;
 use std::{env, fs, thread};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, SubmenuBuilder};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{get_app_handle, get_config, get_tray_id, HANDLE_CONDVAR};
 use std::io::{BufRead, BufReader};
@@ -103,6 +106,13 @@ impl ManagerState {
 
     pub fn start_module(&self, name: &str, args: Option<&Vec<String>>) {
         if !self.is_module_running(name) {
+            if should_skip_module_start(name) {
+                info!(
+                    "Skipping module start for {name}: another ActivityWatch-compatible instance already holds the client lock"
+                );
+                return;
+            }
+
             if let Some(path) = self.modules_discovered.get(name) {
                 start_module_thread(
                     name.to_string(),
@@ -141,6 +151,57 @@ impl ManagerState {
     }
     fn is_module_running(&self, name: &str) -> bool {
         *self.modules_running.get(name).unwrap_or(&false)
+    }
+}
+
+fn should_skip_module_start(name: &str) -> bool {
+    matches!(name, "aw-watcher-afk" | "aw-watcher-window")
+        && activitywatch_client_lock_is_held(name)
+}
+
+fn activitywatch_client_lock_is_held(name: &str) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(mut lock_dir) = appdirs::user_cache_dir(Some("activitywatch"), None) else {
+            return false;
+        };
+        lock_dir.push("client_locks");
+
+        let lock_path = lock_dir.join(format!("{name}-at-127.0.0.1-on-{}", get_config().port));
+        let file = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    debug!(
+                        "Failed to open client lock {}: {}",
+                        lock_path.display(),
+                        err
+                    );
+                }
+                return false;
+            }
+        };
+
+        let fd = file.as_raw_fd();
+        let lock_result = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
+        if lock_result == 0 {
+            let _ = unsafe { flock(fd, LOCK_UN) };
+            false
+        } else {
+            true
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = name;
+        false
     }
 }
 
@@ -428,17 +489,10 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
 
                             if should_restart {
                                 if let Some((secs, restart_count)) = restart_info {
-                                    {
-                                        // Show dialog BEFORE sleeping
-                                        let app = &*get_app_handle()
-                                            .lock()
-                                            .expect("Failed to get app handle");
-                                        app.dialog()
-                                            .message(format!("{name_clone} crashed. Restarting..."))
-                                            .kind(MessageDialogKind::Warning)
-                                            .title("Warning")
-                                            .show(|_| {});
-                                    }
+                                    send_notification(
+                                        "Watcher crashed",
+                                        &format!("{name_clone} crashed. Restarting..."),
+                                    );
                                     error!("Module {name_clone} crashed and will be restarted");
 
                                     thread::sleep(Duration::from_secs(secs));
@@ -473,7 +527,6 @@ fn handle(rx: Receiver<ModuleMessage>, state: Arc<Mutex<ManagerState>>) {
                                     .message(format!(
                                         "{name_clone} keeps on crashing. Restart limit reached."
                                     ))
-                                    .kind(MessageDialogKind::Warning)
                                     .title("Warning")
                                     .show(|_| {});
                                 error!("Module {name_clone} exceeded crash restart limit");
@@ -561,7 +614,10 @@ fn start_generic_module_thread(
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
-        let child = command.stdout(std::process::Stdio::piped()).spawn();
+        let child = command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
 
         let child = match child {
             Ok(c) => c,
@@ -871,8 +927,12 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
-    for path in config.discovery_paths.iter() {
+    // Prefer bundled modules over user-configured and external discovery paths.
+    let mut preferred_paths = config.discovery_paths.clone();
+    preferred_paths.extend(crate::dirs::get_bundled_module_dirs());
+
+    // Check each preferred path and add it to the start of the path list if needed.
+    for path in preferred_paths.iter() {
         if !paths.contains(path) {
             paths.insert(0, path.to_owned());
         }
@@ -965,8 +1025,12 @@ fn discover_modules() -> BTreeMap<String, PathBuf> {
     let path = env::var_os("PATH").unwrap_or_default();
     let mut paths = env::split_paths(&path).collect::<Vec<_>>();
 
-    // check each path in discovery_paths and add it to the start of the paths list if it's not already there
-    for path in config.discovery_paths.iter() {
+    // Prefer bundled modules over user-configured and external discovery paths.
+    let mut preferred_paths = config.discovery_paths.clone();
+    preferred_paths.extend(crate::dirs::get_bundled_module_dirs());
+
+    // Check each preferred path and add it to the start of the path list if needed.
+    for path in preferred_paths.iter() {
         if !paths.contains(path) {
             paths.insert(0, path.to_owned());
         }
