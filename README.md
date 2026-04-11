@@ -35,17 +35,27 @@ Benefits of Tauri:
 
 # Usage
 
-To run:
+Install dependencies once:
 
 ```sh
 npm install
-make dev
 ```
-To build:
+
+For local development:
 
 ```sh
-make build
+make dev
 ```
+
+This runs the Tauri dev app and keeps desktop OAuth in the local app window for easier sign-in testing.
+
+To build, sign, and replace the installed macOS app:
+
+```sh
+make install
+```
+
+This runs a production Tauri build, uses the configured macOS signing identity, and replaces `/Applications/c0re.app` with the newly built app bundle. If your shell user cannot write to `/Applications`, rerun it with elevated privileges.
 
 # Repo stucture
 

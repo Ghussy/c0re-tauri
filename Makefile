@@ -4,12 +4,31 @@ else
 	ARCH :=
 endif
 OS := $(shell uname -s)
+MACOS_APP_BUNDLE := src-tauri/target/release/bundle/macos/c0re.app
+MACOS_INSTALL_PATH := /Applications/c0re.app
+
+.PHONY: build dev install prebuild precommit format check package webui-build
 
 build: prebuild
 	npm run tauri build
 
 dev: prebuild
 	npm run tauri dev
+
+install: build
+ifeq ($(OS),Darwin)
+	@if [ ! -d "$(MACOS_APP_BUNDLE)" ]; then \
+		echo "Missing app bundle at $(MACOS_APP_BUNDLE)"; \
+		exit 1; \
+	fi
+	codesign --verify --deep --strict --verbose=2 "$(MACOS_APP_BUNDLE)"
+	rm -rf "$(MACOS_INSTALL_PATH)"
+	ditto "$(MACOS_APP_BUNDLE)" "$(MACOS_INSTALL_PATH)"
+	@echo "Installed signed app to $(MACOS_INSTALL_PATH)"
+else
+	@echo "make install is only supported on macOS"
+	@exit 1
+endif
 
 %/.git:
 	git submodule update --init --recursive
