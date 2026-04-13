@@ -4,6 +4,7 @@ else
 	ARCH :=
 endif
 OS := $(shell uname -s)
+VITE_SUPABASE_OAUTH_EXTERNAL_BROWSER ?= true
 MACOS_APP_BUNDLE := src-tauri/target/release/bundle/macos/c0re.app
 MACOS_INSTALL_PATH := /Applications/c0re.app
 
@@ -12,6 +13,7 @@ MACOS_INSTALL_PATH := /Applications/c0re.app
 build: prebuild
 	npm run tauri build
 
+dev: VITE_SUPABASE_OAUTH_EXTERNAL_BROWSER=false
 dev: prebuild
 	npm run tauri dev
 
@@ -44,7 +46,7 @@ src-tauri/icons/icon.png: c0re-webui/.git
 	fi
 
 webui-build: c0re-webui/.git c0re-webui/package.json c0re-webui/pnpm-lock.yaml
-	cd c0re-webui && corepack pnpm install --frozen-lockfile && corepack pnpm run build
+	cd c0re-webui && corepack pnpm install --frozen-lockfile && VITE_SUPABASE_OAUTH_EXTERNAL_BROWSER=$(VITE_SUPABASE_OAUTH_EXTERNAL_BROWSER) corepack pnpm run build
 
 prebuild: webui-build node_modules src-tauri/icons/icon.png
 
